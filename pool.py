@@ -3,30 +3,15 @@ pool.py
 -------
 Everything that maps papers to rows of the frozen paper-embedding pool:
     build_candidate_index / load_frozen_paper_index - run the trained PaperTower ONCE over all papers
-    dedup_embeddings  - merge identical embeddings
-    load_paper_pool   - prepare those embeddings for vector retrieval
+    load_paper_pool   - the frozen pool [M, d] + the map global paper id -> pool row
     collapse_groups   - turn a batch of (context, cited paper) records into context groups with gold pool rows
 """
 import os
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 
 from paper_tower import PaperTower   # your Paper Module script (was model.py), same folder
-
-
-# ---------------------------------------------------------------------------
-# Removes duplicate paper embeddings by treating vectors that are identical after rounding as the same paper.
-# Example: During training, if the model is supposed to retrieve one of 3 papers whose vectors is identical,
-#          the loss only has to push the slot vector toward that one shared embedding.
-# sus lezm nahiha
-# ---------------------------------------------------------------------------
-def dedup_embeddings(E, decimals=4):
-    R = np.round(E, decimals) + 0.0                           # round; "+ 0.0" turns -0.0 into 0.0 so they match
-    _, first_idx, inverse = np.unique(R, axis=0, return_index=True, return_inverse=True)   # group identical rows
-    return E[first_idx], np.asarray(inverse).reshape(-1)      # one real embedding per cluster + row -> cluster map
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +30,7 @@ def build_candidate_index(paper_tower, all_paper_feats, candidate_ids, device):
     embs = []
     ids  = candidate_ids.tolist()
 
-    # Encode all candidate papers in chunks of 512 
+    # Encode all candidate papers in batches of 512 
     # The 512 embeddings are then moved to CPU memory to free up GPU memory for the next chunk to avoid GPU memory overflow
     # append the CPU embeddings to a python list and concatenate all chunks to form the final candidate embedding matrix
     for start in tqdm(range(0, len(ids), 512), desc="  Building index", leave=False):
@@ -58,7 +43,7 @@ def build_candidate_index(paper_tower, all_paper_feats, candidate_ids, device):
     # Restore training state before returning
     paper_tower.train(was_training)
 
-    # Concatenate all chunks → [N_candidates, embed_dim]
+    # Concatenate all batches of embeddings into a single tensor and return it
     return torch.cat(embs, dim=0)
 
 
@@ -101,21 +86,15 @@ def load_frozen_paper_index(cfg: dict, device):
 # load_paper_pool
 #
 # Takes the paper embeddings produced by the trained PaperTower (load_frozen_paper_index runs it once,
-# nothing is trained or updated) and prepares them for retrieval by vector similarity:
-#   1. drop all-zero embeddings          (they can never be a meaningful target)
-#   2. merge identical embeddings        (several papers with the same vector = one target row)
-#   3. L2-normalise                      (dot product = cosine similarity)
+# nothing is trained or updated). They are already L2-normalised by the PaperTower, so the dot product
+# of a slot vector with a pool row is a cosine similarity - nothing else to prepare.
 # Returns: pool [M, d] on the device, id2row [n_total] (global paper id -> pool row, -1 = not in the pool).
 # ---------------------------------------------------------------------------
 def load_paper_pool(cfg, device):
     embs, ids, n_total = load_frozen_paper_index(cfg, device)   # [N, d] CPU, [N], int
-    nonzero = embs.abs().sum(dim=1) != 0                      # 1. drop all-zero embeddings
-    embs, ids = embs[nonzero], ids[nonzero]
-    reps, cluster_of_row = dedup_embeddings(embs.numpy())     # 2. identical embeddings -> one row
-    pool = F.normalize(torch.from_numpy(reps), dim=-1).to(device)   # 3. unit length
     id2row = torch.full((n_total,), -1, dtype=torch.long)     # global paper id -> pool row (-1 = absent)
-    id2row[ids] = torch.from_numpy(cluster_of_row).long()
-    return pool, id2row
+    id2row[ids] = torch.arange(len(ids))
+    return embs.to(device), id2row
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +111,7 @@ def load_paper_pool(cfg, device):
 # Returns None if no group has a usable gold paper, else a dict:
 #   group_ids [G] (python list), input_ids [G, L], attention_mask [G, L],
 #   gold_rows [G, Kg] (pool rows, padded with -1), n_gold [G] (number of gold papers)
-# Gold papers that map to the SAME pool row (identical embeddings after de-duplication) count once.
+# Gold papers that map to the SAME pool row (the same paper listed twice for one marker) count once.
 # ---------------------------------------------------------------------------
 def collapse_groups(batch, id2row, max_gold=None):
     group_ids = batch["context_group_id"].tolist()            # group id of every record

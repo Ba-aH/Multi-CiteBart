@@ -6,7 +6,7 @@ Retrieval is nearest-neighbour search by cosine similarity over those embeddings
 
 ## How it works
 
-1. **Frozen paper pool.** The trained PaperTower is run once over all candidate papers. Zero embeddings are dropped, identical embeddings are merged and the rest are L2-normalised.
+1. **Frozen paper pool.** The trained PaperTower is run once over all candidate papers. The embeddings are already L2-normalised, so dot product = cosine.
 2. **One example per citation marker.** A marker that cites several papers is stored as several records. They are batched together and merged into one example with several gold papers.
 3. **Encoder reads the context.** The BART encoder reads the whole context.
 4. **Decoder reads out the [CLS] state.** The decoder starts from `<s>` (the [CLS] token) and attends to the encoder output. Its hidden state at that single position is the only thing read out:
@@ -73,6 +73,6 @@ The best checkpoint (by validation Recall@10) and the final test metrics are wri
 ## Notes
 
 - `max_slots` caps the gold papers per context during training; contexts with more are truncated.
-- Papers with identical embeddings count as one target, so metrics are not directly comparable with a non-deduplicated pool.
+- About 5% of the pool shares an embedding with another paper. They stay separate rows; `evaluate.py` ranks by strictly higher scores, so a tie never counts against the gold paper.
 - `temperature` and the learning rates are starting values, not tuned.
 - The project compiles, but it has not been run end to end yet. Do a one-batch smoke test before a full run.

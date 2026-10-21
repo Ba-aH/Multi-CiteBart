@@ -74,7 +74,7 @@ class LCRDataset(Dataset): # list of pairs (context_text, cited_paper_id)
         self,
         records: List[CitationRecord],
         tokenizer,
-        max_length: int = 256, # BART's hard cap is 1024 but my contexts are short, so 256 is enough 
+        max_length: int = 250, # BART's hard cap is 1024  
     ):
         self.records    = records
         self.tokenizer  = tokenizer
@@ -83,8 +83,9 @@ class LCRDataset(Dataset): # list of pairs (context_text, cited_paper_id)
     def __len__(self):
         return len(self.records)
 
-    def __getitem__(self, idx): # Takes one CitationRecord, runs the tokenizer on context_text and returns a dict with input_ids, attention_mask, and cited_paper_id
-        rec = self.records[idx] # called once per sample per epoch.
+    def __getitem__(self, idx): # Takes one CitationRecord, runs the tokenizer on context_text  
+                                # and returns a dict with input_ids, attention_mask, and cited_paper_id
+        rec = self.records[idx] # context record.
 
         enc = self.tokenizer(
             rec.context_text, # cotext text to be tokenized
@@ -107,7 +108,7 @@ class LCRDataset(Dataset): # list of pairs (context_text, cited_paper_id)
 # ---------------------------------------------------------------------------
 
 def lcr_collate_fn(batch): 
-    #prepare the data for the pytorch's DataLoader to handle variable-length sequences by padding them to the same length within a batch.
+    # prepare the data for the pytorch's DataLoader to handle variable-length sequences by padding them to the same length within a batch.
     # It receives a batch of variable-length sequences (context) from __getitem__, 
     # finds the longest sequence in the batch
     #  add zeros to sequences shorter than the longest sequence (to the attention mask as well as the input_ids)
@@ -150,7 +151,7 @@ def build_datasets(
     all_contexts_path: str,
     node_index_path:   str,
     tokenizer_name:    str  = "facebook/bart-base",
-    max_length:        int  = 256,
+    max_length:        int  = 250,
     train_ratio:       float = 0.8,
     val_ratio:         float = 0.1,
     seed:              int   = 42,
