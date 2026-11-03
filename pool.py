@@ -51,7 +51,7 @@ def build_candidate_index(paper_tower, all_paper_feats, candidate_ids, device):
 # load_frozen_paper_index
 #
 # Rebuilds your trained PaperTower from its checkpoint and runs it ONCE over all candidate papers.
-# These embeddings are the fixed "answer sheet" the slot vectors must match.
+# These embeddings are the fixed "answer sheet" the query vector must match.
 # Returns: cand_embs [N, d] (CPU), cand_ids [N] (global ids), n_total (size of the global-id space).
 # ---------------------------------------------------------------------------
 def load_frozen_paper_index(cfg: dict, device):
@@ -85,10 +85,9 @@ def load_frozen_paper_index(cfg: dict, device):
 # ---------------------------------------------------------------------------
 # load_paper_pool
 #
-# Takes the paper embeddings produced by the trained PaperTower (load_frozen_paper_index runs it once,
-# nothing is trained or updated). They are already L2-normalised by the PaperTower, so the dot product
-# of a slot vector with a pool row is a cosine similarity - nothing else to prepare.
-# Returns: pool [M, d] on the device, id2row [n_total] (global paper id -> pool row, -1 = not in the pool).
+# Takes the paper embeddings produced by the trained PaperTower and builds a frozen pool of candidate papers.
+# The pool is a fixed [M, d] matrix of L2-normalized vectors,
+# where M = number of candidate papers and d = embedding dimension.
 # ---------------------------------------------------------------------------
 def load_paper_pool(cfg, device):
     embs, ids, n_total = load_frozen_paper_index(cfg, device)   # [N, d] CPU, [N], int
@@ -100,34 +99,41 @@ def load_paper_pool(cfg, device):
 # ---------------------------------------------------------------------------
 # collapse_groups
 #
-# Turns a batch of individual citation records into a batch of context groups.
+# Turns a batch of individual citation records into a batch of context groups. 
+#  
 # Records of the same group share the same context text, so we keep the first record's tokens and
 # gather the cited papers of all its records into a padded list of pool rows.
 #
 # Arguments:
-#   batch    : dict from lcr_collate_fn (input_ids, attention_mask, cited_paper_id, context_group_id)
-#   id2row   : CPU LongTensor, global paper id -> row in the pool (-1 = not in the pool)
-#   max_gold : keep at most this many gold papers per group (training: max_slots; eval: None = all)
-# Returns None if no group has a usable gold paper, else a dict:
-#   group_ids [G] (python list), input_ids [G, L], attention_mask [G, L],
-#   gold_rows [G, Kg] (pool rows, padded with -1), n_gold [G] (number of gold papers)
-# Gold papers that map to the SAME pool row (the same paper listed twice for one marker) count once.
+#   batch    : dict from the dataloader, with keys "context_group_id", "cited_paper_id", "input_ids", "attention_mask"
+#   id2row   : CPU LongTensor mapping global paper id -> pool row (-1 = absent) to find the pool rows of the cited papers inside the batch
+#   max_gold : keep at most this many gold papers per group 
+# Returns None if no group has any gold papers, otherwise a dict with keys:
+#   group_ids      : python list of group ids (one per context)
+#   input_ids      : [G, L] LongTensor of tokenized contexts (one per group)
+#   attention_mask : [G, L] LongTensor of valid-token masks
+#   gold_rows      : [G, Kg] LongTensor of pool rows of the gold papers (padded with -1)
+#   n_gold         : [G] LongTensor of how many gold papers each group has (1..Kg)
 # ---------------------------------------------------------------------------
 def collapse_groups(batch, id2row, max_gold=None):
     group_ids = batch["context_group_id"].tolist()            # group id of every record
     cited_rows = id2row[batch["cited_paper_id"]].tolist()     # global paper id -> pool row, per record
-    first, golds = {}, {}                                     # first record index / gold rows, per group
-    for r, (g, row) in enumerate(zip(group_ids, cited_rows)): # walk over the records of the batch
-        if g not in first:                                    # first time we see this group...
-            first[g] = r                                      # ...remember which record carries its tokens
-            golds[g] = []                                     # ...and start its list of gold rows
-        if row >= 0 and row not in golds[g]:                  # usable paper, not a duplicate of an earlier gold
-            golds[g].append(row)                              # add it to the group's gold set
-    keep = [g for g in first if golds[g]]                     # groups that have at least one gold paper
-    if not keep:                                              # nothing usable in this batch
+    first, golds = {}, {}                                     # first[g] = first record of group g, golds[g] = list of pool rows of its cited papers
+                                                              
+    for r, (g, row) in enumerate(zip(group_ids, cited_rows)): # walk over all records in the batch g is the group id, row is the pool row of the cited paper (-1 = doesn't exist in pool)
+        if g not in first:                                    # if this is the first record of group g, remember it and store its gold papers
+            first[g] = r                                      # record index of the first record of group g
+            golds[g] = []                                     # initialize the list of gold papers for this group
+        
+        if row >= 0 and row not in golds[g]:                  # if the cited paper exists in the pool and is not already in the list of gold papers for this group then add it to the list of gold papers for this group
+            golds[g].append(row)                              # adding the pool row of the cited paper to the list of gold papers for this group
+    keep = [g for g in first if golds[g]]                     # keep only the groups that have at least one gold paper (one cited paper that exists in the pool)                     
+                                                              # groups that have at least one gold paper
+    if not keep:                                              # if there is no group with any gold papers, return None
         return None
-    if max_gold is not None:                                  # cap the gold set (training only)
-        golds = {g: v[:max_gold] for g, v in golds.items()}
+    
+    if max_gold is not None:                                  # capping the number of gold papers per group to max_gold if specified else keep all gold papers for each group and return them in the golds dictionary
+        golds = {g: v[:max_gold] for g, v in golds.items()}   # dictionary storing the gold papers for each group, capped at max_gold
     first_idx = torch.tensor([first[g] for g in keep], dtype=torch.long)   # which record to take tokens from
     kg = max(len(golds[g]) for g in keep)                     # widest gold list in this batch
     gold_rows = torch.full((len(keep), kg), -1, dtype=torch.long)          # [G, Kg] padded with -1

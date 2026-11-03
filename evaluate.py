@@ -1,8 +1,9 @@
 """
 evaluate.py
------------
-Group-level evaluation: the count MLP decides how many slot vectors are used, a paper's score is its
-maximum cosine over the used slots, and a gold paper's rank = 1 + number of papers scoring higher.
+--------------
+Group-level evaluation: a paper's score is its cosine with the context's single query vector,
+and a gold paper's rank = 1 + number of papers scoring higher. The count MLP decides how many
+papers are fetched (the top-k), and is scored by count_acc.
 """
 import math
 from collections import defaultdict
@@ -25,7 +26,7 @@ def ranks_to_metrics(group_ranks):
     recall_hits = {k: 0.0 for k in k_values}                  # running sums, one per k
     mrr_sum, ndcg_sum, n_queries = 0.0, 0.0, 0
     for ranks in group_ranks.values():                        # one entry per context group
-        n_papers = len(ranks)                                 # number of gold papers for a grou
+        n_papers = len(ranks)                                 # number of gold papers for a context group
         for k in k_values:
             denom = min(n_papers, k)                          # you cannot hit more than k papers in the top k
             hits = sum(1 for r in ranks if r <= k)            # gold papers inside the top k
@@ -49,13 +50,13 @@ def evaluate(model, loader, pool, id2row, device, K):
         grp = collapse_groups(batch, id2row, max_gold=None)   # keep ALL gold papers of every group
         if grp is None:
             continue
-        vecs, count_logits, _ = model(grp["input_ids"].to(device), grp["attention_mask"].to(device), with_lm=False)
+        input_ids = grp["input_ids"].to(device)                # [G, L] token ids, moved to the device
+        attention_mask = grp["attention_mask"].to(device)      # [G, L] real-token mask, moved to the device
+        query, count_logits = model(input_ids, attention_mask) # one query vector and the count scores per group
         n_hat = count_logits.argmax(dim=-1) + 1               # [G] predicted number of papers
         n_true = grp["n_gold"].to(device).clamp(max=K)        # [G] true number (capped to K)
 
-        sims = torch.einsum("gkd,nd->gkn", vecs.float(), pool)                 # [G, K, M] cosine
-        slot_ok = torch.arange(K, device=device)[None, :] < n_hat[:, None]     # [G, K] slots that are used
-        fused = sims.masked_fill(~slot_ok[:, :, None], float("-inf")).max(dim=1).values   # [G, M]
+        fused = query.float() @ pool.T                        # [G, M] cosine of the single query with every paper
 
         gold_rows = grp["gold_rows"].to(device)               # [G, Kg] (-1 = padding)
         s_gold = fused.gather(1, gold_rows.clamp(min=0))      # score of every gold paper

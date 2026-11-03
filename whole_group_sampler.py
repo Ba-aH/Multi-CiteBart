@@ -11,7 +11,7 @@ Why it exists:
     (citation_type "multiple") therefore appears as several records that share the same text and the
     same context_group_id. Your GroupAwareBatchSampler does the OPPOSITE of this file: it keeps such
     sibling records in different batches, because in the two-tower model siblings would be false
-    negatives of each other. The multi-slot model needs the reverse: all papers cited by one marker
+    negatives of each other. The multi-paper model needs the reverse: all papers cited by one marker
     must travel together, because they become ONE training example with several gold papers.
 
 How it is used (see train.py):

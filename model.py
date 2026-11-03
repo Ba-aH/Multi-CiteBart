@@ -1,51 +1,107 @@
 """
 model.py
---------
-BART encoder-decoder. The ENCODER reads the whole citation context. The DECODER starts with the
-[CLS] token (BART's <s>) and, being causal, only ever works from that token and the encoder output.
-The decoder state at [CLS] feeds two heads:
-    vec_head  : K citation vectors in the paper-embedding space (one per possible cited paper)
-    count_mlp : how many of them to use (1..K)
-The autoregressive part (decoder predicting the context word by word) is kept as an optional LM loss.
+-----------
+Encoder-only citation model. The ENCODER reads the whole citation context and returns one vector per token.
+Those token vectors are pooled into ONE context vector (mean over the real tokens, or the first token).
+The pooled vector feeds two heads:
+    query_proj : ONE citation query vector in the paper-embedding space (used to fetch the nearest papers)
+    count_mlp  : how many nearest papers to fetch (1..K)
+There is no decoder and no language-model loss.
 """
-import torch  
-import torch.nn as nn  .
-import torch.nn.functional as F  
-from transformers import BartForConditionalGeneration  # Loads the pretrained BART encoder-decoder.
+# PyTorch base classes
+import torch
+# Neural network layers
+import torch.nn as nn
+# Functional ops such as normalize
+import torch.nn.functional as F
+# Loads the pretrained encoder (for SciEmbed this is a ModernBERT model)
+from transformers import AutoModel
 
 
-class CitationBART(nn.Module):
-    # Configure the pretrained BART model and the citation-prediction heads.
-    def __init__(self, model_name, embed_dim, max_slots, dropout):
-        super().__init__()  # Initialize nn.Module so PyTorch can track this model's layers.
-        self.K, self.d = max_slots, embed_dim  # Store the number of citation slots and each vector's size.
-        self.bart = BartForConditionalGeneration.from_pretrained(model_name)  # Load pretrained BART weights and layers.
-        H = self.bart.config.d_model  # Get BART's hidden-state width for configuring the output heads.
-        self.dropout = nn.Dropout(dropout)  # Regularize the decoder state before making predictions.
-        self.vec_head = nn.Linear(H, max_slots * embed_dim)  # Project the decoder state into K citation vectors.
-        # Produce one score for each possible citation count from 1 through K.
-        self.count_mlp = nn.Sequential(nn.Linear(H, H), nn.ReLU(), nn.Dropout(dropout),
-                                       nn.Linear(H, max_slots))
+class CitationEncoder(nn.Module):
+    # Configure the pretrained encoder and the citation-prediction heads.
+    def __init__(self, model_name, embed_dim, max_slots, dropout, pooling):
+        # Initialize nn.Module so PyTorch can track this model's layers
+        super().__init__()
+        # Maximum number of papers (K) to fetch per context
+        self.K = max_slots
+        # Size of one paper vector (d)
+        self.d = embed_dim
+        # How token vectors are pooled into one vector: "mean" or "cls"
+        self.pooling = pooling
+        # Fail early if the pooling name is not supported
+        if pooling not in ("mean", "cls"):
+            # Explain which values are allowed
+            raise ValueError(f"pooling must be 'mean' or 'cls', got '{pooling}'")
+        # Load the pretrained encoder weights and layers
+        self.encoder = AutoModel.from_pretrained(model_name)
+        # Hidden-state width of the encoder (768 for ModernBERT-base)
+        H = self.encoder.config.hidden_size
+        # Dropout applied to the pooled vector before the heads so that the model does not overfit to the training contexts
+        self.dropout = nn.Dropout(dropout)
+        # Project the vector from the encoder's hidden size to the paper-embedding size (d)
+        self.query_proj = nn.Linear(H, embed_dim)
+
+        #the count head is a small MLP that predicts how many papers to fetch (1..K) for every context
+        # MLP for the count head: predicts how many papers to fetch (1..K) for every context
+        count_hidden = nn.Linear(H, H)
+        # Activation of the count head
+        count_activation = nn.ReLU()
+        # Dropout inside the count head so that the model does not overfit to the training contexts
+        count_dropout = nn.Dropout(dropout)
+        # Last layer: one score for each possible citation count from 1 through K
+        count_out = nn.Linear(H, max_slots)
+        # Assemble the count head s
+        self.count_mlp = nn.Sequential(count_hidden, count_activation, count_dropout, count_out)
 
     # input_ids and attention_mask have shape [G: batch_size, L: sequence_length]: tokenized contexts and their valid-token masks.
-    # Returns K unit citation vectors per context, count scores, and optional next-token language-model loss.
-    def forward(self, input_ids, attention_mask, with_lm):
-        # For language-model training, feed all but the final token; otherwise, decode from the start token alone.
-        dec_ids = input_ids[:, :-1] if with_lm else input_ids[:, :1]
-        dec_mask = attention_mask[:, :dec_ids.size(1)]  # Keep the decoder mask aligned with its input tokens.
-        # Run BART's encoder and decoder; the result has shape [G, decoder_length, H].
-        h = self.bart.model(input_ids=input_ids, attention_mask=attention_mask,
-                            decoder_input_ids=dec_ids, decoder_attention_mask=dec_mask).last_hidden_state
-        cls_h = self.dropout(h[:, 0])  # Use the decoder's first position, corresponding to BART's start token.
-        # Reshape the projected output to [G, K, d] and normalize each citation vector to unit length.
-        vecs = F.normalize(self.vec_head(cls_h).view(-1, self.K, self.d), dim=-1)
-        count_logits = self.count_mlp(cls_h)  # Return K scores representing the possible citation counts.
+    # Returns one unit query vector per context and the count scores.
+    def forward(self, input_ids, attention_mask):
+        # Run the encoder: one updated vector per token, shape [G, L, H]
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        # Token vectors of the last encoder layer
+        h = outputs.last_hidden_state
+        # Pool the token vectors into one vector per context
+        if self.pooling == "cls":
+            # Use the first token's vector as the summary, shape [G, H]
+            pooled = h[:, 0]
+        # Otherwise average over the real tokens
+        else:
+            # Mask with 1 for real tokens and 0 for padding, shape [G, L, 1]
+            mask = attention_mask.unsqueeze(-1).to(h.dtype)
+            # Sum the vectors of the real tokens, shape [G, H]
+            summed = (h * mask).sum(dim=1)
+            # Number of real tokens per context, shape [G, 1] (never zero)
+            counts = mask.sum(dim=1).clamp(min=1e-9)
+            # Mean of the real token vectors, shape [G, H]
+            pooled = summed / counts
+        # Apply dropout to the pooled vector
+        pooled = self.dropout(pooled)
+        # Project to shape [G, d]
+        projected = self.query_proj(pooled)
+        # Normalize the query vector to unit length
+        query = F.normalize(projected, dim=-1)
+        # K scores representing the possible citation counts, shape [G, K]
+        count_logits = self.count_mlp(pooled)
+        # Return the query vector and the count scores
+        return query, count_logits
 
-        lm_loss = h.new_zeros(())  # Default to a scalar zero on the same device and with the same dtype as h.
-        if with_lm:  # Optionally train BART to predict each context's next token.
-            logits = self.bart.lm_head(h) + self.bart.final_logits_bias  # Convert decoder states to vocabulary scores.
-            # Shift labels one token ahead and mark padding positions with -100 so the loss ignores them.
-            tgt = input_ids[:, 1:].masked_fill(attention_mask[:, 1:] == 0, -100)
-            # Cross-entropy expects class scores on dimension 1; ignore_index skips the marked padding labels.
-            lm_loss = F.cross_entropy(logits.transpose(1, 2).float(), tgt, ignore_index=-100)
-        return vecs, count_logits, lm_loss  # Return citation vectors, count scores, and the optional LM loss.
+
+
+    # Returns, for each context, the indices of its k nearest papers, where k comes from count_mlp.
+    @torch.no_grad()
+    def retrieve(self, query, count_logits, paper_embs):
+        # Best count score gives k in 1..K
+        k_per_ctx = count_logits.argmax(dim=-1) + 1
+        # Cosine similarity, since both sides are unit vectors
+        sims = query @ paper_embs.T
+        # Take the K nearest once, then cut each row to its own k
+        top = sims.topk(self.K, dim=-1).indices
+        # Start an empty list of results
+        results = []
+        # Visit every context with its own k
+        for i, k in enumerate(k_per_ctx.tolist()):
+            # Keep the k nearest papers of this context
+            results.append(top[i, :k])
+        # Return the nearest papers of every context
+        return results
