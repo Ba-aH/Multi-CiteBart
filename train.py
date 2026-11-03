@@ -2,36 +2,23 @@
 train.py
 --------
 python train.py --config config.json
+nohup python train.py --config config.json >myoutfile 2>&1 &
 """
-# Standard library: file paths
 import os
-# Standard library: read/write JSON
 import json
-# Standard library: Python RNG
 import random
-# Standard library: command-line arguments
 import argparse
 
-# NumPy for its RNG seeding
 import numpy as np
-# PyTorch for the model and training
 import torch
-# DataLoader wraps a dataset into batches
 from torch.utils.data import DataLoader
-# Progress bar for the training loop
 from tqdm import tqdm
 
-# Dataset builder and collate function
 from dataset import build_datasets, lcr_collate_fn
-# Sampler that keeps whole context groups in the same batch
 from whole_group_sampler import WholeGroupBatchSampler
-# Paper-pool loader and group-merging helper
 from pool import load_paper_pool, collapse_groups
-# Combined training loss
 from losses import total_loss
-# Encoder-only citation model
 from model import CitationEncoder
-# Validation/test evaluation function
 from evaluate import evaluate
 
 
