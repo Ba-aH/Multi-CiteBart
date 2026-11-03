@@ -20,9 +20,9 @@ import torch.nn.functional as F
 # tau = temperature for InfoNCE 
 # ---------------------------------------------------------------------------
 def query_alignment_loss(query, gold_rows, train_embs, tau):
-    dev = query.device                                        # vectors of papers are on the same device as the query vectors
+    dev = query.device                                        # where the vectors live
     gold_rows = gold_rows.to(dev)                             # fetch the gold rows to the same device as the query vectors
-    valid = gold_rows >= 0                                    # valid store 
+    valid = gold_rows >= 0                                    # valid store
     logits = query.float() @ train_embs.T / tau               # [G, M] similarity to every frozen paper
     log_p = F.log_softmax(logits, dim=1)                      # [G, M] log-probability of every paper
     log_p_gold = log_p.gather(1, gold_rows.clamp(min=0))      # [G, Kg] log-probability of every gold paper
@@ -33,13 +33,13 @@ def query_alignment_loss(query, gold_rows, train_embs, tau):
 # ---------------------------------------------------------------------------
 # total_loss
 #
-# count     : cross-entropy loss for the count MLP (how many papers to fetch)
+# count     : cross-entropy loss for the count head (how many papers to fetch)
 # align     : InfoNCE loss for the single query (which papers to fetch)
 # total     : 0.5 * count + 0.5 * align
 # ---------------------------------------------------------------------------
 def total_loss(query, count_logits, grp, pool, tau):
     n_gold = grp["n_gold"].to(count_logits.device)            # true number of gold papers for every context group
     K = count_logits.size(1) # count logits = [G, K] where K = max number of papers to fetch and G = number of context groups in the batch
-    count = F.cross_entropy(count_logits.float(), n_gold.clamp(max=K) - 1) # cross-entropy loss for the count MLP (how many papers to fetch)
+    count = F.cross_entropy(count_logits.float(), n_gold.clamp(max=K) - 1) # cross-entropy loss for the count head (how many papers to fetch)
     align, _ = query_alignment_loss(query, grp["gold_rows"], pool, tau)
     return 0.5 * count + 0.5 * align, align, count

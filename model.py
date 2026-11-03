@@ -5,7 +5,7 @@ Encoder-only citation model. The ENCODER reads the whole citation context and re
 Those token vectors are pooled into ONE context vector (mean over the real tokens, or the first token).
 The pooled vector feeds two heads:
     query_proj : ONE citation query vector in the paper-embedding space (used to fetch the nearest papers)
-    count_mlp  : how many nearest papers to fetch (1..K)
+    count_head : how many nearest papers to fetch (1..K)
 There is no decoder and no language-model loss.
 """
 # PyTorch base classes
@@ -41,18 +41,9 @@ class CitationEncoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         # Project the vector from the encoder's hidden size to the paper-embedding size (d)
         self.query_proj = nn.Linear(H, embed_dim)
-
-        #the count head is a small MLP that predicts how many papers to fetch (1..K) for every context
-        # MLP for the count head: predicts how many papers to fetch (1..K) for every context
-        count_hidden = nn.Linear(H, H)
-        # Activation of the count head
-        count_activation = nn.ReLU()
-        # Dropout inside the count head so that the model does not overfit to the training contexts
-        count_dropout = nn.Dropout(dropout)
-        # Last layer: one score for each possible citation count from 1 through K
-        count_out = nn.Linear(H, max_slots)
-        # Assemble the count head s
-        self.count_mlp = nn.Sequential(count_hidden, count_activation, count_dropout, count_out)
+        # Count head: a single linear layer that predicts how many papers to fetch (1..K) for every context
+        # It outputs one score for each possible citation count from 1 through K
+        self.count_head = nn.Linear(H, max_slots)
 
     # input_ids and attention_mask have shape [G: batch_size, L: sequence_length]: tokenized contexts and their valid-token masks.
     # Returns one unit query vector per context and the count scores.
@@ -82,13 +73,12 @@ class CitationEncoder(nn.Module):
         # Normalize the query vector to unit length
         query = F.normalize(projected, dim=-1)
         # K scores representing the possible citation counts, shape [G, K]
-        count_logits = self.count_mlp(pooled)
+        count_logits = self.count_head(pooled)
         # Return the query vector and the count scores
         return query, count_logits
 
-
-
-    # Returns, for each context, the indices of its k nearest papers, where k comes from count_mlp.
+    # query has shape [G, d]; paper_embs has shape [N, d] (unit vectors from the paper tower).
+    # Returns, for each context, the indices of its k nearest papers, where k comes from count_head.
     @torch.no_grad()
     def retrieve(self, query, count_logits, paper_embs):
         # Best count score gives k in 1..K

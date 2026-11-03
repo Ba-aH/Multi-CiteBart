@@ -64,7 +64,7 @@ def train_one_epoch(model, loader, optimizer, pool, id2row, device, cfg):
         attention_mask = grp["attention_mask"].to(device)
 
         # FORWARD PASS: the encoder reads all context tokens; the token vectors are pooled into one
-        # vector that feeds query_proj (query) and count_mlp (count_logits)
+        # vector that feeds query_proj (query) and count_head (count_logits)
         query, count_logits = model(input_ids, attention_mask)
 
         # Combine retrieval alignment and citation-count prediction.
@@ -233,16 +233,16 @@ def main():
     dropout = cfg["dropout"]
     # How token vectors are pooled into one context vector ("mean" or "cls")
     pooling = cfg["pooling"]
-    # Build CitationEncoder (pretrained encoder + query_proj and count_mlp heads)
+    # Build CitationEncoder (pretrained encoder + query_proj and count_head heads)
     model = CitationEncoder(model_name, embed_dim, max_slots, dropout, pooling)
     # Move the model to the device
     model = model.to(device)
     # Parameters of the query head
     query_proj_params = list(model.query_proj.parameters())
     # Parameters of the count head
-    count_mlp_params = list(model.count_mlp.parameters())
-    # Collect the parameters of the two new heads (query_proj and count_mlp)
-    heads = query_proj_params + count_mlp_params
+    count_head_params = list(model.count_head.parameters())
+    # Collect the parameters of the two new heads (query_proj and count_head)
+    heads = query_proj_params + count_head_params
     # Parameter group for the encoder with its small learning rate
     backbone_group = {"params": model.encoder.parameters(), "lr": cfg["lr_backbone"]}
     # Parameter group for the heads with their larger learning rate

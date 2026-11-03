@@ -4,7 +4,7 @@
   "paper_ckpt": "~/HGNN/checkpoints/exp_PP_MLP_hidden500(run2)/best_model.pt",
   "output_dir": "~/HGNN/checkpoints",
   "model_name": "J0nasW/sciembed-full",
-  "pooling": "mean",
+  "pooling": "cls",
   "max_length": 256,
   "max_slots": 5,
   "batch_size": 64,

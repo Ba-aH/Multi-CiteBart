@@ -2,7 +2,7 @@
 evaluate.py
 --------------
 Group-level evaluation: a paper's score is its cosine with the context's single query vector,
-and a gold paper's rank = 1 + number of papers scoring higher. The count MLP decides how many
+and a gold paper's rank = 1 + number of papers scoring higher. The count head decides how many
 papers are fetched (the top-k), and is scored by count_acc.
 """
 import math
